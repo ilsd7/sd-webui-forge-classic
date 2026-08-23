@@ -155,20 +155,94 @@ def deactivate(p, extra_network_data):
 
 
 re_extra_net = re.compile(r"<(\w+):([^>]+)>")
+re_line_break = re.compile(r"\r\n?|\n")
+
+
+def _is_escaped(text, index):
+    backslashes = 0
+    while index > 0 and text[index - 1] == "\\":
+        backslashes += 1
+        index -= 1
+
+    return backslashes % 2 == 1
+
+
+def _merge_extra_network_whitespace(left, right, keep_inline_space=True):
+    """Collapse tag-adjacent whitespace while preserving the larger line gap."""
+    left_breaks = re_line_break.findall(left)
+    right_breaks = re_line_break.findall(right)
+    if left_breaks or right_breaks:
+        return "".join(left_breaks if len(left_breaks) >= len(right_breaks) else right_breaks)
+
+    return " " if keep_inline_space and (left or right) else ""
+
+
+def _remove_extra_network_tag(prompt, start, end):
+    prompt_len = len(prompt)
+
+    left = start
+    while left > 0 and prompt[left - 1].isspace():
+        left -= 1
+
+    left_comma = left > 0 and prompt[left - 1] == "," and not _is_escaped(prompt, left - 1)
+    if left_comma:
+        left -= 1
+        comma_index = left
+
+        while left > 0 and prompt[left - 1].isspace():
+            left -= 1
+
+        if left > 0 and prompt[left - 1] == ",":
+            # Keep whitespace that separates an unrelated preceding comma.
+            left = comma_index
+
+    right = end
+    while right < prompt_len and prompt[right].isspace():
+        right += 1
+
+    right_comma = right < prompt_len and prompt[right] == ","
+    if right_comma:
+        right += 1
+
+    while right < prompt_len and prompt[right].isspace():
+        right += 1
+
+    if left == 0:
+        return prompt[right:]
+    if right == prompt_len:
+        return prompt[:left].rstrip()
+
+    left_syntax = prompt[left - 1] in "([" and not _is_escaped(prompt, left - 1)
+    right_syntax = prompt[right] in ")]"
+    syntax_boundary = left_syntax or right_syntax
+
+    left_whitespace = prompt[left:start].replace(",", "", 1)
+    right_whitespace = prompt[end:right].replace(",", "", 1)
+    separator = "," if not syntax_boundary and (left_comma or right_comma) else ""
+    replacement = separator + _merge_extra_network_whitespace(
+        left_whitespace,
+        right_whitespace,
+        keep_inline_space=not syntax_boundary,
+    )
+
+    return prompt[:left] + replacement + prompt[right:]
 
 
 def parse_prompt(prompt):
     res = defaultdict(list)
+    if "<" not in prompt:
+        return prompt, res
 
-    def found(m):
-        name = m.group(1)
-        args = m.group(2)
+    matches = list(re_extra_net.finditer(prompt))
+
+    for match in matches:
+        name = match.group(1)
+        args = match.group(2)
 
         res[name].append(ExtraNetworkParams(items=args.split(":")))
 
-        return ""
-
-    prompt = re.sub(re_extra_net, found, prompt)
+    for match in reversed(matches):
+        prompt = _remove_extra_network_tag(prompt, *match.span())
 
     return prompt, res
 
